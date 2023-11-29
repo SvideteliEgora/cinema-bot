@@ -1,4 +1,5 @@
-from datetime import datetime, timedelta, date
+from fuzzywuzzy import fuzz
+from datetime import datetime
 import asyncio
 import logging
 import gspread
@@ -13,7 +14,7 @@ from aiogram.types import Message, CallbackQuery
 from aiogram.utils.keyboard import InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardBuilder
 from aiogram.utils.markdown import hbold
 
-from functions import unique_titles, convert_to_movie_schedule, get_movies, dict_cleaner, get_indexes, convert_to_movie_schedule_from_list2
+from functions import get_movies, get_indexes
 
 from config import TOKEN
 
@@ -31,17 +32,48 @@ dt_list1 = worksheet1.get_all_values()
 dt_list2 = worksheet2.get_all_values()
 
 
-# get tuple with unique cinemas titles
-unique_cinemas_titles = unique_titles(dt_list1, element_index=1)
+unique_cinemas_titles = []
+for item in dt_list1:
+    unique_cinemas_titles.append(item[1])
+unique_cinemas_titles = tuple(set(unique_cinemas_titles))
 
-# get tuple with unique films titles
-unique_movies_titles = unique_titles(dt_list1, element_index=0)
 
-# get structure of type: {cinema: {movie: [time]}}
-schedule_data = convert_to_movie_schedule(dt_list1)
+unique_movies_titles = []
+for item in dt_list1:
+    unique_movies_titles.append(item[0])
+unique_movies_titles = tuple(set(unique_movies_titles))
 
-# get structure of type: {movie: {description: [params]}}
-schedule_data_from_list2 = convert_to_movie_schedule_from_list2(dt_list2)
+
+# structure of type: {cinema: {movie: [time]}}
+schedule_data_from_list1 = {}
+for item in dt_list1:
+    cinema = item[1]
+    if cinema not in schedule_data_from_list1:
+        schedule_data_from_list1[cinema] = {}
+
+    movie = item[0]
+    if movie not in schedule_data_from_list1[cinema]:
+        schedule_data_from_list1[cinema][movie] = []
+
+    for dt in item[2:]:
+        if dt != '':
+            schedule_data_from_list1[cinema][movie].append(datetime.fromtimestamp(float(dt)))
+
+
+# structure of type: {movie: {description: [params]}}
+schedule_data_from_list2 = {}
+for item in dt_list2:
+    movie = item[0]
+    if movie not in schedule_data_from_list2:
+        schedule_data_from_list2[movie] = {}
+
+    description = item[1]
+    if description not in schedule_data_from_list2[movie]:
+        schedule_data_from_list2[movie][description] = []
+
+    for param in item[2:]:
+        if param != '':
+            schedule_data_from_list2[movie][description].append(param)
 
 
 # murkups
@@ -89,7 +121,7 @@ selected_user_date = {}
 async def command_start_handler(message: Message) -> None:
 
     kb = [
-        [KeyboardButton(text='Дата'), KeyboardButton(text='Кинотеатр')]
+        [KeyboardButton(text='Дата✅'), KeyboardButton(text='Кинотеатр✅')]
     ]
     start_kb = ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True)
 
@@ -99,23 +131,48 @@ async def command_start_handler(message: Message) -> None:
                         parse_mode=ParseMode.HTML)
 
 
-@dp.message(F.text.lower() == 'дата')
+@dp.message(F.text.lower() == 'дата✅')
 async def handler_text_date(message: Message):
-    dict_cleaner(selected_user_date, selected_user_cinema, message.from_user.id)
+    try:
+        del selected_user_date[message.from_user.id]
+        del selected_user_cinema[message.from_user.id]
+    except KeyError:
+        pass
 
     await message.answer(text='Выберите дату:',
                          reply_markup=await SimpleCalendar().start_calendar())
 
 
-@dp.message(F.text.lower() == 'кинотеатр')
+@dp.message(F.text.lower() == 'кинотеатр✅')
 async def handler_text_cinema(message: Message):
-    dict_cleaner(selected_user_date, selected_user_cinema, message.from_user.id)
+    try:
+        del selected_user_date[message.from_user.id]
+        del selected_user_cinema[message.from_user.id]
+    except KeyError:
+        pass
 
     cinemas_indexes = get_indexes(unique_cinemas_titles, unique_cinemas_titles)
     await message.answer(text='Выберите кинотеатр:',
                          reply_markup=await ikb_options(indexes=cinemas_indexes,
                                                         titles=unique_cinemas_titles,
                                                         element_type='cinema'))
+
+
+@dp.message(F.text)
+async def handler_text_messages(message: Message):
+    movies = []
+    for movie in unique_movies_titles:
+        if fuzz.WRatio(movie, message.text) >= 70:
+            movies.append(movie)
+
+    if movies:
+        indexes = get_indexes(unique_movies_titles, movies)
+        await message.answer(text='Фильмы по вашему запросу:',
+                             reply_markup=await ikb_options(indexes=indexes,
+                                                            element_type='movie',
+                                                            titles=unique_movies_titles))
+    else:
+        await message.answer(text='Фильмов по вашему запросу не найдено.')
 
 
 @dp.callback_query(SimpleCalendarCallback.filter())
@@ -137,7 +194,7 @@ async def process_simple_calendar(callback_query: CallbackQuery, callback_data: 
 
         if cinema_ind:
             cinema = unique_cinemas_titles[cinema_ind]
-            movies_titles = get_movies(schedule_data, cinema, user_date)
+            movies_titles = get_movies(schedule_data_from_list1, cinema, user_date)
             movies_titles_indexes = get_indexes(unique_movies_titles, movies_titles)
 
             await callback_query.message.edit_text(text=f'Фильмы которые пройдут {user_date.strftime("%d.%m.%Y")} в кинотеатре - "{cinema}":',
@@ -169,7 +226,7 @@ async def cb_next_page(callback_query: CallbackQuery):
         cinema_ind = selected_user_cinema.get(callback_query.from_user.id)
         cinema = unique_cinemas_titles[cinema_ind]
 
-        movies_titles = get_movies(schedule_data=schedule_data,
+        movies_titles = get_movies(schedule_data=schedule_data_from_list1,
                                    cinema=cinema,
                                    user_date=selected_user_date.get(callback_query.from_user.id))
 
@@ -190,7 +247,7 @@ async def cb_cinema(callback_query: CallbackQuery):
     user_date = selected_user_date.get(callback_query.from_user.id)
 
     if user_date:
-        movies_titles = get_movies(schedule_data, cinema, user_date)
+        movies_titles = get_movies(schedule_data_from_list1, cinema, user_date)
         movies_titles_indexes = get_indexes(unique_movies_titles, movies_titles)
 
         await callback_query.message.edit_text(text=f'Фильмы которые пройдут {user_date.strftime("%d.%m.%Y")} в кинотеатре - "{cinema}":',
