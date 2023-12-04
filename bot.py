@@ -11,15 +11,19 @@ from aiogram.enums import ParseMode
 from aiogram.filters import Command
 from aiogram.filters.callback_data import CallbackData
 from aiogram.types import Message, CallbackQuery
-from aiogram.utils.keyboard import InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardBuilder
+from aiogram.utils.keyboard import InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardBuilder, InlineKeyboardButton
 from aiogram.utils.markdown import hbold
 
-from functions import get_movies, get_indexes
+from functions import get_movies_and_showtime
 
 from config import TOKEN
 
 
 logging.basicConfig(level=logging.INFO, stream=sys.stdout)
+
+bot = Bot(token=TOKEN)
+dp = Dispatcher(skip_updates=True)
+
 
 # google sheets
 gs = gspread.service_account('venv\\true-sprite-405907-da4b97639184.json')
@@ -27,21 +31,27 @@ sht = gs.open_by_url('https://docs.google.com/spreadsheets/d/12ccv7iv0kmbs8i2sbF
 worksheet1 = sht.get_worksheet(0)
 worksheet2 = sht.get_worksheet(1)
 
+
 # get list1 and list1 from Google sheets
 dt_list1 = worksheet1.get_all_values()
 dt_list2 = worksheet2.get_all_values()
 
 
-unique_cinemas_titles = []
-for item in dt_list1:
-    unique_cinemas_titles.append(item[1])
-unique_cinemas_titles = tuple(set(unique_cinemas_titles))
+selected_user_cinema = {}
+selected_user_date = {}
+selected_user_movie = {}
 
 
-unique_movies_titles = []
+all_cinemas_titles = []
 for item in dt_list1:
-    unique_movies_titles.append(item[0])
-unique_movies_titles = tuple(set(unique_movies_titles))
+    all_cinemas_titles.append(item[1])
+all_cinemas_titles = tuple(set(all_cinemas_titles))
+
+
+all_movies_titles = []
+for item in dt_list1:
+    all_movies_titles.append(item[0])
+all_movies_titles = tuple(set(all_movies_titles))
 
 
 # structure of type: {cinema: {movie: [time]}}
@@ -77,102 +87,130 @@ for item in dt_list2:
 
 
 # murkups
-async def ikb_options(indexes: tuple | list, element_type: str, titles: tuple | list, current_page=1) -> InlineKeyboardMarkup:
+kb = [
+    [KeyboardButton(text='Дата✅'), KeyboardButton(text='Кинотеатр✅')]
+]
+start_kb = ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True)
+
+
+async def ikb_cinemas(cinemas: list, all_cinemas_titles: list | tuple, current_page=1) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
-
     buttons_on_page = 10
-    pages_count = (len(indexes) - 1) // buttons_on_page + 1
+    pages_count = (len(cinemas) - 1) // buttons_on_page + 1
 
-    for ind in indexes[:buttons_on_page]:
-        builder.button(text=titles[ind], callback_data=f'{element_type}_{ind}')
+    for cin in cinemas[:buttons_on_page]:
+        builder.button(text=cin, callback_data=f'cinema_{all_cinemas_titles.index(cin)}')
     builder.adjust(1)
 
-    if len(indexes) > buttons_on_page:
+    if len(cinemas) > buttons_on_page:
         builder.button(text=f'{current_page} / {pages_count}', callback_data='pages_count')
         builder.adjust(1)
-        builder.button(text='>>', callback_data=f'next_{current_page + 1}_{element_type}')
+        builder.button(text='>>', callback_data=f'next_cinema_{current_page + 1}')
 
     if current_page > 1:
         builder = InlineKeyboardBuilder()
-        for ind in indexes[(current_page - 1) * buttons_on_page:current_page * buttons_on_page]:
-            builder.button(text=titles[ind], callback_data=f'{element_type}_{ind}')
+        for cin in cinemas[(current_page - 1) * buttons_on_page:current_page * buttons_on_page]:
+            builder.button(text=cin, callback_data=f'cinema_{all_cinemas_titles.index(cin)}')
         builder.adjust(1)
 
-        builder.button(text='<<', callback_data=f'next_{current_page - 1}_{element_type}')
+        builder.button(text='<<', callback_data=f'next_cinema_{current_page - 1}')
         builder.adjust(1)
         builder.button(text=f'{current_page} / {pages_count}', callback_data='pages_count')
 
         if current_page < pages_count:
-            builder.button(text='>>', callback_data=f'next_{current_page + 1}_{element_type}')
+            builder.button(text='>>', callback_data=f'next_cinema_{current_page + 1}')
 
     ikb = builder.as_markup()
 
     return ikb
 
 
-bot = Bot(token=TOKEN)
-dp = Dispatcher(skip_updates=True)
+async def ikb_movies(movies_data: list | tuple, all_movies_titles: list | tuple) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
 
-selected_user_cinema = {}
-selected_user_date = {}
+    for movie in movies_data:
+        builder.button(text=f'{movie}', callback_data=f'movie_{all_movies_titles.index(movie)}')
+    builder.adjust(1)
+
+    return builder.as_markup()
 
 
+# functions
+async def clear_user_selections(user_id: int) -> None:
+    global selected_user_date, selected_user_cinema, selected_user_movie
+    try:
+        print(f"До очистки: {selected_user_date.get(user_id)}")
+        selected_user_date[user_id] = None
+
+        print(f"До очистки: {selected_user_cinema.get(user_id)}")
+        selected_user_cinema[user_id] = None
+
+        print(f"До очистки: {selected_user_movie.get(user_id)}")
+        selected_user_movie[user_id] = None
+    except KeyError:
+        pass
+    finally:
+        print(f"После очистки: {selected_user_date.get(user_id)}")
+        print(f"После очистки: {selected_user_cinema.get(user_id)}")
+        print(f"После очистки: {selected_user_movie.get(user_id)}")
+
+
+async def send_movie_schedule(callback_query, movie_and_showtime, user_date, user_cinema, all_movies_titles) -> None:
+    for item in movie_and_showtime:
+        for movie, showtime in item.items():
+            ikb = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text=movie, callback_data=f'movie_{all_movies_titles.index(movie)}')]])
+            await callback_query.message.answer(text=f'Дата: {user_date.strftime("%d.%m.%Y")}\n'
+                                                     f'Кинотеатр: "{user_cinema}"\n'
+                                                     f'Время сеансов: {", ".join(showtime)}\n'
+                                                     f'Фильм:⬇️',
+                                                reply_markup=ikb)
+
+
+# handlers
 @dp.message(Command('start'))
 async def command_start_handler(message: Message) -> None:
-
-    kb = [
-        [KeyboardButton(text='Дата✅'), KeyboardButton(text='Кинотеатр✅')]
-    ]
-    start_kb = ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True)
-
+    await clear_user_selections(message.from_user.id)
     await message.reply(text=f'Приветствую, {hbold(message.from_user.full_name)}!\n'
                              f'Выберите начальный критерий для поиска сеанса:',
                         reply_markup=start_kb,
                         parse_mode=ParseMode.HTML)
 
 
-@dp.message(F.text.lower() == 'дата✅')
-async def handler_text_date(message: Message):
-    try:
-        del selected_user_date[message.from_user.id]
-        del selected_user_cinema[message.from_user.id]
-    except KeyError:
-        pass
+@dp.message(F.text == 'Дата✅')
+async def date_handler(message: Message) -> None:
 
     await message.answer(text='Выберите дату:',
                          reply_markup=await SimpleCalendar().start_calendar())
 
 
-@dp.message(F.text.lower() == 'кинотеатр✅')
-async def handler_text_cinema(message: Message):
-    try:
-        del selected_user_date[message.from_user.id]
-        del selected_user_cinema[message.from_user.id]
-    except KeyError:
-        pass
+@dp.message(F.text == 'Кинотеатр✅')
+async def cinema_handler(message: Message) -> None:
 
-    cinemas_indexes = get_indexes(unique_cinemas_titles, unique_cinemas_titles)
     await message.answer(text='Выберите кинотеатр:',
-                         reply_markup=await ikb_options(indexes=cinemas_indexes,
-                                                        titles=unique_cinemas_titles,
-                                                        element_type='cinema'))
+                         reply_markup=await ikb_cinemas(cinemas=all_cinemas_titles,
+                                                        all_cinemas_titles=all_cinemas_titles))
 
 
 @dp.message(F.text)
 async def handler_text_messages(message: Message):
     movies = []
-    for movie in unique_movies_titles:
-        if fuzz.WRatio(movie, message.text) >= 70:
+
+    await clear_user_selections(message.from_user.id)
+    for movie in all_movies_titles:
+        if fuzz.WRatio(movie, message.text) == 100:
+            ikb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=movie, callback_data=f'movie_{all_movies_titles.index(movie)}')]])
+            await message.answer(text='Фильм по вашему запросу:',
+                                 reply_markup=ikb)
+        elif fuzz.WRatio(movie, message.text) >= 85:
             movies.append(movie)
 
     if movies:
-        indexes = get_indexes(unique_movies_titles, movies)
         await message.answer(text='Фильмы по вашему запросу:',
-                             reply_markup=await ikb_options(indexes=indexes,
-                                                            element_type='movie',
-                                                            titles=unique_movies_titles))
+                             reply_markup=await ikb_movies(movies_data=movies,
+                                                           all_movies_titles=all_movies_titles))
     else:
-        await message.answer(text='Фильмов по вашему запросу не найдено.')
+        await message.answer(text='По вашему запросу нет совпадений.')
 
 
 @dp.callback_query(SimpleCalendarCallback.filter())
@@ -181,93 +219,109 @@ async def process_simple_calendar(callback_query: CallbackQuery, callback_data: 
     if selected:
         user_date = datetime.date(date)
         current_date = datetime.now().date()
-
         if user_date < current_date:
             await callback_query.message.edit_text(text='Выбранная вами дата уже прошла, пожалуйста, выберите другую дату:',
                                                    reply_markup=await SimpleCalendar().start_calendar())
             return
 
-        cinemas_indexes = get_indexes(unique_cinemas_titles, unique_cinemas_titles)
-
         selected_user_date[callback_query.from_user.id] = user_date
-        cinema_ind = selected_user_cinema.get(callback_query.from_user.id)
+        user_cinema = selected_user_cinema.get(callback_query.from_user.id)
+        user_movie = selected_user_movie.get(callback_query.from_user.id)
 
-        if cinema_ind:
-            cinema = unique_cinemas_titles[cinema_ind]
-            movies_titles = get_movies(schedule_data_from_list1, cinema, user_date)
-            movies_titles_indexes = get_indexes(unique_movies_titles, movies_titles)
+        if user_cinema:
+            movie_and_showtime = get_movies_and_showtime(schedule_data_from_list1, user_cinema, user_date)
+            await send_movie_schedule(callback_query, movie_and_showtime, user_date, user_cinema, all_movies_titles)
+            await clear_user_selections(callback_query.from_user.id)
 
-            await callback_query.message.edit_text(text=f'Фильмы которые пройдут {user_date.strftime("%d.%m.%Y")} в кинотеатре - "{cinema}":',
-                                                   reply_markup=await ikb_options(titles=unique_movies_titles,
-                                                                                  indexes=movies_titles_indexes,
-                                                                                  element_type='movie'))
-            return
+        elif user_movie:
+            for cinema, movie_and_showtime in schedule_data_from_list1.items():
+                for movie, showtime in movie_and_showtime.items():
+                    if movie == user_movie:
+                        showtime_list = []
+                        for st in showtime:
+                            if st.date() == user_date:
+                                showtime_list.append(st.strftime('%H:%M'))
+                        await callback_query.message.answer(text=f'Кинотеатр: "{cinema}"\n'
+                                                                 f'Фильм: "{user_movie}"\n'
+                                                                 f'Дата: {user_date.strftime("%d.%m.%Y")}\n'
+                                                                 f'Время сеансов: {", ".join(showtime_list)}')
+                        await clear_user_selections(callback_query.from_user.id)
+        else:
+            await callback_query.message.edit_text(text=f'Теперь выберите кинотеатр:',
+                                                   reply_markup=await ikb_cinemas(cinemas=all_cinemas_titles,
+                                                                                  all_cinemas_titles=all_cinemas_titles))
 
-        await callback_query.message.edit_text(text=f'Теперь выберите кинотеатр:',
-                                               reply_markup=await ikb_options(titles=unique_cinemas_titles,
-                                                                              indexes=cinemas_indexes,
-                                                                              element_type='cinema'))
 
-
-@dp.callback_query(F.data.startswith('next'))
-async def cb_next_page(callback_query: CallbackQuery):
+@dp.callback_query(F.data.startswith('next_cinema'))
+async def next_cinemas_page_cb(callback_query: CallbackQuery):
     cb_data = callback_query.data.split('_')
-    page = int(cb_data[1])
-    element_type = cb_data[2]
+    page = int(cb_data[2])
 
-    titles = None
-    indexes = None
-
-    if element_type == 'cinema':
-        titles = unique_cinemas_titles
-        indexes = get_indexes(titles, titles)
-
-    elif element_type == 'movie':
-        cinema_ind = selected_user_cinema.get(callback_query.from_user.id)
-        cinema = unique_cinemas_titles[cinema_ind]
-
-        movies_titles = get_movies(schedule_data=schedule_data_from_list1,
-                                   cinema=cinema,
-                                   user_date=selected_user_date.get(callback_query.from_user.id))
-
-        titles = unique_movies_titles
-        indexes = get_indexes(titles, movies_titles)
-
-    await callback_query.message.edit_reply_markup(reply_markup=await ikb_options(titles=titles,
-                                                                                  indexes=indexes,
-                                                                                  element_type=element_type,
+    await callback_query.message.edit_reply_markup(reply_markup=await ikb_cinemas(cinemas=all_cinemas_titles,
+                                                                                  all_cinemas_titles=all_cinemas_titles,
                                                                                   current_page=page))
 
 
 @dp.callback_query(F.data.startswith('cinema'))
-async def cb_cinema(callback_query: CallbackQuery):
-    cinema_ind = int(callback_query.data.split('_')[1])
-    cinema = unique_cinemas_titles[cinema_ind]
-    selected_user_cinema[callback_query.from_user.id] = cinema_ind
+async def cinema_cb(callback_query: CallbackQuery):
+    cb_data = callback_query.data.split('_')
+    cinema_index = int(cb_data[1])
+    user_cinema = all_cinemas_titles[cinema_index]
+    selected_user_cinema[callback_query.from_user.id] = user_cinema
     user_date = selected_user_date.get(callback_query.from_user.id)
+    user_movie = selected_user_movie.get(callback_query.from_user.id)
 
     if user_date:
-        movies_titles = get_movies(schedule_data_from_list1, cinema, user_date)
-        movies_titles_indexes = get_indexes(unique_movies_titles, movies_titles)
+        movie_and_showtime = get_movies_and_showtime(schedule_data_from_list1, user_cinema, user_date)
+        await send_movie_schedule(callback_query, movie_and_showtime, user_date, user_cinema, all_movies_titles)
+        await clear_user_selections(callback_query.from_user.id)
 
-        await callback_query.message.edit_text(text=f'Фильмы которые пройдут {user_date.strftime("%d.%m.%Y")} в кинотеатре - "{cinema}":',
-                                               reply_markup=await ikb_options(titles=unique_movies_titles,
-                                                                              indexes=movies_titles_indexes,
-                                                                              element_type='movie'))
+    elif user_movie:
+        date_and_time = schedule_data_from_list1.get(user_cinema).get(user_movie)
+        if date_and_time:
+
+            showtime_list = []
+            day = None
+
+            for item in date_and_time:
+                if day == item.strftime('%d.%m.%Y'):
+                    showtime_list.append(item.strftime('%H:%M'))
+                elif day is None:
+                    day = item.strftime('%d.%m.%Y')
+                    showtime_list.append(item.strftime('%H:%M'))
+                else:
+                    await callback_query.message.answer(text=f'Кинотеатр: "{user_cinema}"\n'
+                                                             f'Фильм: "{user_movie}"\n'
+                                                             f'Дата: {day}\n'
+                                                             f'Время сеансов: {", ".join(showtime_list)}')
+                    showtime_list.clear()
+                    day = item.strftime('%d.%m.%Y')
+                    showtime_list.append(item.strftime('%H:%M'))
+
+            if day is not None and showtime_list:
+                await callback_query.message.answer(text=f'Кинотеатр: "{user_cinema}"\n'
+                                                         f'Фильм: "{user_movie}"\n'
+                                                         f'Дата: {day}\n'
+                                                         f'Время сеансов: {", ".join(showtime_list)}')
+            return
+        await callback_query.message.answer(text=f'К сожалению, фильм "{user_movie}" в настоящее время не представлен в кинотеатре "{user_cinema}".')
+        await clear_user_selections(callback_query.from_user.id)
     else:
         await callback_query.message.edit_text(text='Теперь выберите дату:',
                                                reply_markup=await SimpleCalendar().start_calendar())
 
 
 @dp.callback_query(F.data.startswith('movie'))
-async def cb_movie(callback_query: CallbackQuery):
+async def movie_cb(callback_query: CallbackQuery):
     cb_data = callback_query.data.split('_')
     movie_ind = int(cb_data[1])
-    movie = unique_movies_titles[movie_ind]
+    user_movie = all_movies_titles[movie_ind]
 
-    await callback_query.message.answer(text=movie)
+    selected_user_movie[callback_query.from_user.id] = user_movie
 
-    for description, params in schedule_data_from_list2[movie].items():
+    await callback_query.message.answer(text=user_movie)
+
+    for description, params in schedule_data_from_list2[user_movie].items():
         await callback_query.message.answer(text=description)
 
         text = ''
@@ -275,9 +329,15 @@ async def cb_movie(callback_query: CallbackQuery):
             text += param + '\n'
         await callback_query.message.answer(text=text)
 
+    if not selected_user_cinema.get(callback_query.from_user.id) and not selected_user_date.get(callback_query.from_user.id):
+        await callback_query.message.answer(text='Дата✅ - для выбора даты сеанса.\n'
+                                                 'Кинотеатр✅ - для выбора кинотеатра.',
+                                            reply_markup=start_kb)
+
 
 async def main():
     await dp.start_polling(bot)
+
 
 if __name__ == '__main__':
     asyncio.run(main())
